@@ -1,12 +1,19 @@
+# Create a .gif from png screenshots of leaflet map:
+
+# code based upon code mentioned at 
+# https://stackoverflow.com/questions/33508486/create-a-gif-from-a-series-of-leaflet-maps-in-r
+
+# packages ----
 library(webshot)
 library(leaflet)
 library(htmlwidgets)
 library(tidyverse)
+library(magick)
 
+# create sequence of years ----
 years <- seq(1950,2015,1)          # some zoom levels to animate
 
-## Make the maps, this will make some pngs called 'map_avg_le.png'
-## in your current directory
+# forloop to create maps ----
 for (i in seq_along(years)) {
   map <- leaflet(subset(all_dat, !is.na(code) & year == years[i]), options= leafletOptions( minZoom=2
                                                                                             , maxZoom=12) )%>% 
@@ -23,16 +30,15 @@ for (i in seq_along(years)) {
                   fillOpacity = 0.7,
                   bringToFront = TRUE))
   
-  map$x$options = append(map$x$options, list("zoomControl" = FALSE))
+  map$x$options = append(map$x$options, list("zoomControl" = FALSE)) # this removes zoom controls
   
-  ## This is the png creation part
+  # save as png ----
   saveWidget(map, 'temp.html', selfcontained = FALSE)
   webshot('temp.html', file=paste0("map_avg_le",i,".png"),
           cliprect = 'viewport')
 }
 
-library(magick)
-
+# create gif file ----
 png.files <- sprintf("map_avg_le%01d.png", 1:66) #Mention the number of files to read
 GIF.convert <- function(x, output = "global_life_expectancy.gif")#Create a function to read, animate and convert the files to gif
 {
