@@ -1,0 +1,133 @@
+# tidy tuesday - week 19
+
+# get packages ----
+library(tidyverse)
+library(naniar) # for missing data vis
+library(ggrepel)
+
+# get data ----
+tidy_tues <- read.csv("tidy tuesday/week19_airline_safety.csv")[,-1]
+str(tidy_tues)
+
+# check for missing ----
+gg_miss_which(tidy_tues)
+
+# look at data ----
+with(tidy_tues, table(year_range))
+with(tidy_tues, table(airline))
+tidy_tues %>% 
+  group_by(type_of_event) %>% 
+  summarise(min = min(n_events), max = max(n_events), mean = mean(n_events),
+            median = median(n_events), iqr = IQR(n_events))
+
+# tidy the data ----
+tidy_tues_tidied <- tidy_tues %>% 
+  mutate(airline = gsub("*", "", airline)) %>% 
+  unite(key, type_of_event, year_range) %>% 
+  spread(key = key, value = n_events) %>% 
+  mutate(avail_seat_km_tot = avail_seat_km_per_week*52*15) 
+
+# funnel plot ----
+
+# derive standard error ----
+dt <- tidy_tues_tidied %>% 
+  rename(var_after_unquo = incidents_00_14,
+         var_b4_unquo = incidents_85_99,
+         pop_after_unquo = avail_seat_km_per_week,
+         pop_b4_unquo = avail_seat_km_per_week_dup) %>% 
+  mutate(rate_diff = var_after_unquo/pop_after_unquo - var_b4_unquo/pop_after_unquo,
+         rate_diff_1000 = rate_diff*10^12,
+         rate_b4 = var_b4_unquo/pop_after_unquo,
+         rate_after = var_after_unquo/pop_after_unquo, 
+         rate_se_b4 = sqrt(rate_b4*(1-rate_b4)/pop_after_unquo),
+         rate_se_after = sqrt(rate_after*(1-rate_after)/pop_after_unquo),
+         rate_diff_se = sqrt(rate_se_b4^2 + rate_se_after^2)*10^12,
+         pop_round = round(pop_after_unquo, -11))
+
+# derive common (fixed) effect ----
+rate_fem_b4 <- weighted.mean(dt$rate_b4, 1/dt$rate_se_b4)
+rate_fem_after <- weighted.mean(dt$rate_after, 1/dt$rate_se_after)
+rate_diff_fem <- weighted.mean(dt$rate_diff*10^12, 1/dt$rate_diff_se)
+
+if(is.nan(rate_diff_fem)){
+  rate_diff_fem <- mean(dt$rate_diff*10^12)
+  rate_fem_after <- mean(dt$rate_after)
+  rate_fem_b4 <- mean(dt$rate_b4)
+  warning("weighted means could not be calculated. Arithmetic mean used instead.")
+}
+
+rate1000_fem_after <- rate_fem_after*10^12
+rate1000_fem_b4 <- rate_fem_b4*10^12
+
+## lower and upper limits for 95% and 99.9% CI, based on FEM estimator ----
+p_b4 <- rate_fem_b4*(1-rate_fem_b4)
+p_after <- rate_fem_after*(1-rate_fem_after)
+
+number.seq <- seq(2*10^11, max(dt$pop_after_unquo), 10^11)
+number.ll95 <- rate_diff_fem - 1.96 * (sqrt((p_b4/number.seq) + (p_after/number.seq)))*10^12
+number.ul95 <- rate_diff_fem + 1.96 * (sqrt((p_b4/number.seq) + (p_after/number.seq)))*10^12
+number.ll999 <- rate_diff_fem - 3.29 * (sqrt((p_b4/number.seq) + (p_after/number.seq)))*10^12
+number.ul999 <- rate_diff_fem + 3.29 * (sqrt((p_b4/number.seq) + (p_after/number.seq)))*10^12
+number.se <- (sqrt((p_b4/number.seq) + (p_after/number.seq)))*10^12
+dfCI <- data.frame(number.ll95, number.ul95, number.ll999, number.ul999, number.seq, number.se, rate_diff_fem)
+
+
+# create labels for 'outliers' ----
+labels <- left_join(dt, dfCI, by = c("pop_round" = "number.seq")) %>% 
+  mutate(label_name = ifelse(rate_diff_1000 > number.ul999 | rate_diff_1000 < number.ll999 , airline, NA),
+         label_rate = ifelse(!is.na(label_name), round(rate_diff_1000,1), NA),
+         label_comb = ifelse(!is.na(label_name) & !is.na(label_rate), paste(label_name, label_rate, sep = ": "), NA)) %>% 
+  dplyr::select(airline, starts_with("label_"))  
+
+final_dt <- left_join(dt, labels, by = c("airline"))
+
+
+# draw funnel plot (lazily adapted from existing function created for another purpose)----
+p <- ggplot(data = final_dt, aes(x = pop_after_unquo, y = rate_diff_1000)) +
+  geom_point(aes(colour = rate_b4*10^12), alpha = 0.85, size = 2) +
+  geom_line(aes(x = number.seq, y = number.ll95, linetype = "dashed"), data = dfCI) +
+  geom_line(aes(x = number.seq, y = number.ul95), data = dfCI, linetype = "dashed") +
+  geom_line(aes(x = number.seq, y = number.ll999, linetype = "longdash"),  data = dfCI) +
+  geom_line(aes(x = number.seq, y = number.ul999), linetype = "longdash", data = dfCI) +
+  geom_hline(aes(yintercept = rate_diff_fem), data = dfCI) +
+  # geom_text_repel(aes(label = label_name),size = 3.2, nudge_x = 11000, nudge_y = -0.05) +
+  scale_linetype_manual("",values = c("dashed", "longdash"), labels = c("95% confidence limit", "99.9% confidence limit")) +
+  # scale_y_continuous(limits = c(-5, 5)) +
+  # scale_x_continuous(breaks = c(0, 50000, 100000, 150000, 200000, 250000, 300000),
+  #                    limits = c(0, 340000)) +
+  scale_colour_gradient("1985-1999 rate", low = "black", high = "#56B4E9") +
+   xlab("ASKs per trillion") + ylab("Change in rate") +
+  theme(axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        axis.text = element_text(colour = "black")) #+
+
+p + scale_y_continuous(limits = c(-75, 25)) +
+  scale_x_continuous(breaks = seq(2*10^11, 6.2*10^12, 10^12),
+                     limits = c(2*10^11, 6.2*10^12),
+                     labels = as.character(seq(2, 62, 10))) +
+  geom_text_repel(aes(label = label_name),size = 3.2, nudge_x = 11000, nudge_y = -0.05) +
+  labs(title = "Funnel plot of the change in rate of airline incidents per trillion ASKs,",
+       subtitle = "between 1985-1999 and 2000-2014.",
+       caption = "*Includes regional subsidiaries; ASKs = Available Seat Kilometers.")
+
+# regression to the mean ----
+ggplot(data = final_dt, aes( x = rate_b4*10^12, y = rate_diff*10^12)) +
+  geom_point(aes(colour= pop_after_unquo/10^12, size = pop_after_unquo/10^12), alpha = 0.5) +
+  geom_hline(yintercept = rate_diff_fem, colour = "red", linetype = "dotted") +
+  labs(title = "Before and after analyses are susceptible to regression to the mean") +
+  xlab("rate of incidents, per trillion  ASKs (1985 to 1999)") +
+  ylab("change in rate from 1985-1999 to 2000-2014") +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        axis.text = element_text(colour = "black")) +
+  scale_y_continuous(limits = c(-75, 15)) +
+  scale_x_continuous(limits = c(0, 80)) +
+  scale_size_continuous("ASKs (trillion)") +
+  scale_color_continuous(guide = "none")
